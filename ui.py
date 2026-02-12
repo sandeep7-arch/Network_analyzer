@@ -9,6 +9,7 @@ class CursesUI:
         self.analyzer = analyzer
         self.scroll_offset = 0
         self.selected_idx = 0
+        self.detail_offset = 0  # <--- New: Track scroll inside inspector
         self.auto_scroll = True
         self.view_mode = "MENU"
         self.status_msg = "Welcome. Press 'C' to Start."
@@ -46,7 +47,6 @@ class CursesUI:
         return inp
 
     def _hexdump(self, src, length=16):
-        """Standard hex dump: Offset | Hex | ASCII"""
         result = []
         for i in range(0, len(src), length):
             chunk = src[i:i + length]
@@ -56,14 +56,10 @@ class CursesUI:
         return result
 
     def _get_sparkline(self, data):
-        if not data:
-            return ""
+        if not data: return ""
         chars = [" ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
         max_val = max(data) if max(data) > 0 else 1
-        line = ""
-        for val in data:
-            idx = int((val / max_val) * 7)
-            line += chars[idx]
+        line = "".join([chars[int((val / max_val) * 7)] for val in data])
         return line
 
     def draw_menu(self):
@@ -75,7 +71,7 @@ class CursesUI:
         menu_win.addstr(2, 4, "[ C ] Start Live Capture")
         menu_win.addstr(3, 4, "[ L ] Load PCAP File")
         menu_win.addstr(5, 4, "[ Q ] Quit")
-        self.stdscr.addstr(h-2, 2, f"Status: {self.status_msg}", curses.color_pair(4))
+        self.stdscr.addstr(h-2, 2, f"Status: {self.status_msg}"[:w-2], curses.color_pair(4))
         self.stdscr.refresh()
         menu_win.refresh()
 
@@ -100,30 +96,22 @@ class CursesUI:
         self.update_details()
         self.update_alerts()
 
-        # --- Enhanced Footer with LIVE/PAUSED Status ---
+        # Status Bar Logic
         if self.sniffer.paused:
-            status_text = " ○ PAUSED "
-            status_col = curses.color_pair(4) # Yellow
+            status_text, status_col = " ○ PAUSED ", curses.color_pair(4)
         else:
-            status_text = " ● LIVE   "
-            status_col = curses.color_pair(1) # Green
+            status_text, status_col = " ● LIVE   ", curses.color_pair(1)
 
-        menu_text = f" | [Q] Menu | [G] Stats | [W] Save | [Space] Toggle | {self.status_msg}"
+        scroll_info = "[AUTO]" if self.auto_scroll else "[MANUAL]"
+        menu_text = f" | {scroll_info} | [Q] Menu | [G] Stats | [PgUp/Dn] Inspect | {self.status_msg}"
 
         try:
-            # 1. Draw the black background for the whole footer
             self.stdscr.attron(curses.A_REVERSE)
             self.stdscr.addstr(h-1, 0, " " * (w-1))
-
-            # 2. Add the LIVE/PAUSED label with color
             self.stdscr.addstr(h-1, 0, status_text, status_col | curses.A_REVERSE | curses.A_BOLD)
-
-            # 3. Add the rest of the text
             self.stdscr.addstr(h-1, len(status_text), menu_text[:w-len(status_text)-1])
             self.stdscr.attroff(curses.A_REVERSE)
-        except curses.error:
-            pass
-
+        except curses.error: pass
         self.stdscr.refresh()
 
     def update_details(self):
@@ -131,26 +119,38 @@ class CursesUI:
         self.win_detail.box()
         self.win_detail.addstr(0, 2, " [ PACKET INSPECTOR ] ", curses.color_pair(7))
         h, w = self.win_detail.getmaxyx()
+
         if self.sniffer.packets and self.selected_idx < len(self.sniffer.packets):
             pkt = self.sniffer.packets[self.selected_idx]
             lines = []
+
+            # 1. Summary Headers
             if pkt.haslayer(Ether): lines.append((f"Ether: {pkt[Ether].src} -> {pkt[Ether].dst}", 5))
             if pkt.haslayer(IP): lines.append((f"IP: {pkt[IP].src} -> {pkt[IP].dst} (TTL:{pkt[IP].ttl})", 4))
             if pkt.haslayer(TCP): lines.append((f"TCP: {pkt[TCP].sport} -> {pkt[TCP].dport} [{pkt[TCP].flags}]", 1))
-            if pkt.haslayer(Raw):
-                lines.append(("--- RAW PAYLOAD (HEX) ---", 0))
-                for row in self._hexdump(bytes(pkt[Raw].load)): lines.append((row, 2))
+            elif pkt.haslayer(UDP): lines.append((f"UDP: {pkt[UDP].sport} -> {pkt[UDP].dport}", 2))
 
-            for i, (text, col) in enumerate(lines):
+            # 2. FULL Hex Dump (Wireshark Style)
+            lines.append(("-" * (w-4), 0))
+            lines.append(("FULL PACKET HEX DATA:", 0))
+            for row in self._hexdump(bytes(pkt)):
+                lines.append((row, 2))
+
+            # 3. Draw with scrolling offset
+            for i, (text, col) in enumerate(lines[self.detail_offset:]):
                 if i >= h - 2: break
-                self.win_detail.addstr(i+1, 2, text[:w-4], curses.color_pair(col))
+                try:
+                    self.win_detail.addstr(i+1, 2, text[:w-4], curses.color_pair(col))
+                except curses.error: pass
         self.win_detail.refresh()
 
     def update_packet_list(self):
         self.win_list.erase()
         h, w = self.win_list.getmaxyx()
         header = f" ID   TIME     PROT  SOURCE            DESTINATION     LEN "
-        self.win_list.addstr(0, 0, header.ljust(w), curses.color_pair(7))
+        try: self.win_list.addstr(0, 0, header.ljust(w-1)[:w-1], curses.color_pair(7))
+        except: pass
+
         pkts = self.sniffer.packets
         if not pkts:
             self.win_list.refresh()
@@ -158,25 +158,38 @@ class CursesUI:
 
         max_rows = h - 1
         if self.selected_idx >= len(pkts): self.selected_idx = len(pkts) - 1
-        if self.selected_idx < self.scroll_offset: self.scroll_offset = self.selected_idx
-        elif self.selected_idx >= self.scroll_offset + max_rows: self.scroll_offset = self.selected_idx - max_rows + 1
+
+        # Adjust scroll window
+        if self.selected_idx < self.scroll_offset:
+            self.scroll_offset = self.selected_idx
+        elif self.selected_idx >= self.scroll_offset + max_rows:
+            self.scroll_offset = self.selected_idx - max_rows + 1
 
         for i in range(max_rows):
             idx = self.scroll_offset + i
             if idx >= len(pkts): break
             p = pkts[idx]
+
             proto = "TCP" if p.haslayer(TCP) else "UDP" if p.haslayer(UDP) else "ICMP" if p.haslayer(ICMP) else "OTH"
             src = p[IP].src if p.haslayer(IP) else "Local"
             dst = p[IP].dst if p.haslayer(IP) else "Local"
-            row = f"{idx:<4} {time.strftime('%H:%M:%S', time.localtime(p.time))} {proto:<4} {src:>15} -> {dst:<15} {len(p)}"
+
+            # The float() fix for PCAP loading
+            t_str = time.strftime('%H:%M:%S', time.localtime(float(p.time)))
+            row = f"{idx:<4} {t_str} {proto:<4} {src:>15} -> {dst:<15} {len(p)}"
+
             color = curses.color_pair(1 if proto=="TCP" else 2 if proto=="UDP" else 3)
-            if idx == self.selected_idx:
-                self.win_list.attron(curses.color_pair(6))
-            else:
-                self.win_list.attron(color)
-            self.win_list.addstr(i+1, 0, row[:w-1])
-            self.win_list.attroff(curses.color_pair(6) if idx == self.selected_idx else color)
-            self.analyzer.check_packet(p)
+            try:
+                if idx == self.selected_idx:
+                    self.win_list.attron(curses.color_pair(6))
+                    self.win_list.addstr(i+1, 0, row.ljust(w-1)[:w-1])
+                    self.win_list.attroff(curses.color_pair(6))
+                else:
+                    self.win_list.attron(color)
+                    self.win_list.addstr(i+1, 0, row.ljust(w-1)[:w-1])
+                    self.win_list.attroff(color)
+            except curses.error: pass
+
         self.win_list.refresh()
 
     def draw_stats_graphics(self):
@@ -215,9 +228,11 @@ class CursesUI:
         self.win_alert.erase()
         self.win_alert.box()
         self.win_alert.addstr(0, 2, " [ THREAT ALERTS ] ", curses.color_pair(7))
-        recent = self.analyzer.alerts[-(self.win_alert.getmaxyx()[0]-3):]
+        h, w = self.win_alert.getmaxyx()
+        recent = self.analyzer.alerts[-(h-3):]
         for i, (ts, sev, msg) in enumerate(recent):
-            self.win_alert.addstr(i+1, 1, f"[{ts}] {msg}"[:self.win_alert.getmaxyx()[1]-2], curses.color_pair(5 if sev=="CRITICAL" else 4))
+            try: self.win_alert.addstr(i+1, 1, f"[{ts}] {msg}"[:w-2], curses.color_pair(5 if sev=="CRITICAL" else 4))
+            except: pass
         self.win_alert.refresh()
 
     def run(self):
@@ -234,44 +249,40 @@ class CursesUI:
                         success, msg = self.sniffer.load_from_file(fname)
                         self.status_msg = msg
                         if success: self.view_mode = "LIST"
-                elif key in [ord('q'), ord('Q')]:
-                    break
+                elif key in [ord('q'), ord('Q')]: break
             else:
-                # 1. Snap selection to bottom if auto-scroll is active
                 if self.sniffer.mode == "LIVE" and not self.sniffer.paused and self.auto_scroll:
-                    if self.sniffer.packets:
-                        self.selected_idx = len(self.sniffer.packets)-1
+                    if self.sniffer.packets: self.selected_idx = len(self.sniffer.packets)-1
 
                 self.draw_dashboard()
                 key = self.stdscr.getch()
 
-                if key == ord('q'):
-                    self.view_mode = "MENU"
-                elif key == ord('g'):
-                    self.view_mode = "STATS" if self.view_mode == "LIST" else "LIST"
-
+                if key == ord('q'): self.view_mode = "MENU"
+                elif key == ord('g'): self.view_mode = "STATS" if self.view_mode == "LIST" else "LIST"
                 elif key == ord(' '):
-                    # 2. Toggle pause AND reset auto_scroll when resuming
-                    is_now_paused = self.sniffer.toggle_pause()
-                    if not is_now_paused:
-                        self.auto_scroll = True  # Resume snapping to bottom
+                    is_paused = self.sniffer.toggle_pause()
+                    if not is_paused: self.auto_scroll = True
 
-                elif key == ord('w') or key == ord('W'):
-                    fname = self.get_input("Save as:")
-                    if fname:
-                        success, msg = self.sniffer.save_capture(fname)
-                        self.status_msg = msg
+                # --- Detail Scrolling (Page Up/Down) ---
+                elif key == curses.KEY_NPAGE: # Page Down
+                    self.detail_offset += 5
+                elif key == curses.KEY_PPAGE: # Page Up
+                    self.detail_offset = max(0, self.detail_offset - 5)
 
                 elif key == curses.KEY_DOWN:
                     if self.sniffer.packets:
                         self.selected_idx = min(len(self.sniffer.packets)-1, self.selected_idx + 1)
-                        # 3. Optional: if user scrolls manually back to the bottom, resume auto-scroll
-                        if self.selected_idx == len(self.sniffer.packets) - 1:
-                            self.auto_scroll = True
+                        self.detail_offset = 0 # Reset hex view on move
+                        if self.selected_idx == len(self.sniffer.packets) - 1: self.auto_scroll = True
 
                 elif key == curses.KEY_UP:
                     if self.sniffer.packets:
                         self.selected_idx = max(0, self.selected_idx - 1)
-                        self.auto_scroll = False  # Stay where we are
+                        self.detail_offset = 0 # Reset hex view on move
+                        self.auto_scroll = False
+
+                elif key in [ord('w'), ord('W')]:
+                    fname = self.get_input("Save as:")
+                    if fname: self.status_msg = self.sniffer.save_capture(fname)[1]
 
             time.sleep(0.05)
