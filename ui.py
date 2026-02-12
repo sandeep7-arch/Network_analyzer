@@ -100,13 +100,30 @@ class CursesUI:
         self.update_details()
         self.update_alerts()
 
-        footer = f" [Q] Menu | [G] Stats | [W] Save | [Space] Pause | {self.status_msg}"
+        # --- Enhanced Footer with LIVE/PAUSED Status ---
+        if self.sniffer.paused:
+            status_text = " ○ PAUSED "
+            status_col = curses.color_pair(4) # Yellow
+        else:
+            status_text = " ● LIVE   "
+            status_col = curses.color_pair(1) # Green
+
+        menu_text = f" | [Q] Menu | [G] Stats | [W] Save | [Space] Toggle | {self.status_msg}"
+
         try:
+            # 1. Draw the black background for the whole footer
             self.stdscr.attron(curses.A_REVERSE)
-            self.stdscr.addstr(h-1, 0, footer[:w-1].ljust(w-1))
+            self.stdscr.addstr(h-1, 0, " " * (w-1))
+
+            # 2. Add the LIVE/PAUSED label with color
+            self.stdscr.addstr(h-1, 0, status_text, status_col | curses.A_REVERSE | curses.A_BOLD)
+
+            # 3. Add the rest of the text
+            self.stdscr.addstr(h-1, len(status_text), menu_text[:w-len(status_text)-1])
             self.stdscr.attroff(curses.A_REVERSE)
         except curses.error:
             pass
+
         self.stdscr.refresh()
 
     def update_details(self):
@@ -220,25 +237,41 @@ class CursesUI:
                 elif key in [ord('q'), ord('Q')]:
                     break
             else:
+                # 1. Snap selection to bottom if auto-scroll is active
                 if self.sniffer.mode == "LIVE" and not self.sniffer.paused and self.auto_scroll:
                     if self.sniffer.packets:
                         self.selected_idx = len(self.sniffer.packets)-1
+
                 self.draw_dashboard()
                 key = self.stdscr.getch()
+
                 if key == ord('q'):
                     self.view_mode = "MENU"
                 elif key == ord('g'):
                     self.view_mode = "STATS" if self.view_mode == "LIST" else "LIST"
+
                 elif key == ord(' '):
-                    self.sniffer.toggle_pause()
+                    # 2. Toggle pause AND reset auto_scroll when resuming
+                    is_now_paused = self.sniffer.toggle_pause()
+                    if not is_now_paused:
+                        self.auto_scroll = True  # Resume snapping to bottom
+
                 elif key == ord('w') or key == ord('W'):
                     fname = self.get_input("Save as:")
                     if fname:
                         success, msg = self.sniffer.save_capture(fname)
                         self.status_msg = msg
+
                 elif key == curses.KEY_DOWN:
-                    self.selected_idx = min(len(self.sniffer.packets)-1, self.selected_idx + 1)
+                    if self.sniffer.packets:
+                        self.selected_idx = min(len(self.sniffer.packets)-1, self.selected_idx + 1)
+                        # 3. Optional: if user scrolls manually back to the bottom, resume auto-scroll
+                        if self.selected_idx == len(self.sniffer.packets) - 1:
+                            self.auto_scroll = True
+
                 elif key == curses.KEY_UP:
-                    self.selected_idx = max(0, self.selected_idx - 1)
-                    self.auto_scroll = False
+                    if self.sniffer.packets:
+                        self.selected_idx = max(0, self.selected_idx - 1)
+                        self.auto_scroll = False  # Stay where we are
+
             time.sleep(0.05)
