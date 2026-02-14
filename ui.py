@@ -157,8 +157,17 @@ class CursesUI:
 
         if self.selected_idx >= len(pkts): self.selected_idx = len(pkts) - 1
 
-        start = max(0, self.selected_idx - (h//2))
-        end = min(len(pkts), start + h - 1)
+        rows_capacity = h - 1
+
+        # Calculate start to center selection
+        start = self.selected_idx - (rows_capacity // 2)
+
+        # If list is long enough, pull back 'start' so the screen stays full
+        if len(pkts) > rows_capacity:
+            start = min(start, len(pkts) - rows_capacity)
+
+        start = max(0, start)
+        end = min(len(pkts), start + rows_capacity)
 
         for i in range(start, end):
             p = pkts[i]
